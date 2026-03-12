@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenAI } from "@google/genai";
+import Groq from "groq-sdk";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/server";
 import { AnalysisResult } from "@/lib/types";
@@ -10,7 +10,7 @@ const requestSchema = z.object({
   esText: z.string().min(10, "ES text must be at least 10 characters"),
 });
 
-// ── Output validation (mirrors the JSON schema we ask Gemini to return) ─────
+// ── Output validation ────────────────────────────────────────────────────────
 const scoresSchema = z.object({
   logicalClarity: z.number().min(1).max(10),
   leadership: z.number().min(1).max(10),
@@ -44,8 +44,8 @@ export async function POST(req: NextRequest) {
   }
   const { company, esText } = parsed.data;
 
-  // ── Call Google Gemini ────────────────────────────────────────────────────
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  // ── Call Groq ─────────────────────────────────────────────────────────────
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
   let analysis: AnalysisResult;
   try {
@@ -66,25 +66,24 @@ Return ONLY a valid JSON object — no markdown, no code fence — with exactly 
     "quantifiedResults": <integer 1-10>,
     "impact": <integer 1-10>
   },
-  "feedback": "<detailed 2–4 sentence evaluation>",
-  "improvements": "<2–4 specific, actionable improvement suggestions>",
+  "feedback": "<detailed 2-4 sentence evaluation>",
+  "improvements": "<2-4 specific, actionable improvement suggestions>",
   "improvedEs": "<rewritten ES using the STAR framework (Situation, Task, Action, Result)>"
 }`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: prompt,
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+      temperature: 0.4,
     });
 
-    const raw = response.text;
-    if (!raw) throw new Error("Empty response from Gemini");
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw) throw new Error("Empty response from Groq");
 
-    // Strip possible markdown code fences
-    const cleaned = raw.replace(/^```(?:json)?\n?/m, "").replace(/```\s*$/m, "").trim();
-
-    const validated = analysisSchema.safeParse(JSON.parse(cleaned));
+    const validated = analysisSchema.safeParse(JSON.parse(raw));
     if (!validated.success) {
-      console.error("Gemini response failed schema validation", validated.error);
+      console.error("Groq response failed schema validation", validated.error);
       throw new Error("AI returned unexpected format");
     }
     analysis = validated.data;
