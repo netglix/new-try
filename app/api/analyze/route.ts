@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/server";
 import { AnalysisResult } from "@/lib/types";
@@ -10,7 +10,7 @@ const requestSchema = z.object({
   esText: z.string().min(10, "ES text must be at least 10 characters"),
 });
 
-// ── Output validation (mirrors the JSON schema we ask OpenAI to return) ─────
+// ── Output validation (mirrors the JSON schema we ask Gemini to return) ─────
 const scoresSchema = z.object({
   logicalClarity: z.number().min(1).max(10),
   leadership: z.number().min(1).max(10),
@@ -44,9 +44,8 @@ export async function POST(req: NextRequest) {
   }
   const { company, esText } = parsed.data;
 
-  // ── Call OpenAI ───────────────────────────────────────────────────────────
-  // Instantiate inside the handler so the module can be imported without the key
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  // ── Call Google Gemini ────────────────────────────────────────────────────
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   let analysis: AnalysisResult;
   try {
@@ -72,19 +71,20 @@ Return ONLY a valid JSON object — no markdown, no code fence — with exactly 
   "improvedEs": "<rewritten ES using the STAR framework (Situation, Task, Action, Result)>"
 }`;
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      response_format: { type: "json_object" },
-      temperature: 0.4,
+    const response = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: prompt,
     });
 
-    const raw = completion.choices[0]?.message?.content;
-    if (!raw) throw new Error("Empty response from OpenAI");
+    const raw = response.text;
+    if (!raw) throw new Error("Empty response from Gemini");
 
-    const validated = analysisSchema.safeParse(JSON.parse(raw));
+    // Strip possible markdown code fences
+    const cleaned = raw.replace(/^```(?:json)?\n?/m, "").replace(/```\s*$/m, "").trim();
+
+    const validated = analysisSchema.safeParse(JSON.parse(cleaned));
     if (!validated.success) {
-      console.error("OpenAI response failed schema validation", validated.error);
+      console.error("Gemini response failed schema validation", validated.error);
       throw new Error("AI returned unexpected format");
     }
     analysis = validated.data;
@@ -99,7 +99,6 @@ Return ONLY a valid JSON object — no markdown, no code fence — with exactly 
     const token = authHeader.slice(7);
     try {
       const supabase = createAdminClient();
-      // Verify the user token and get user info
       const {
         data: { user },
         error: userError,
@@ -115,7 +114,6 @@ Return ONLY a valid JSON object — no markdown, no code fence — with exactly 
             analysis_result: analysis,
           });
         if (insertError) {
-          // Log but don't fail — analysis result is still returned
           console.error("Failed to save history:", insertError.message);
         }
       }
